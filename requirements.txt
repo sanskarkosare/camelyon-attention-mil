@@ -1,0 +1,12 @@
+torch>=2.0.0
+torchvision>=0.15.0
+openslide-bin
+openslide-python
+opencv-python-headless
+numpy
+pandas
+Pillow
+scikit-learn
+matplotlib
+boto3
+tqdm
