@@ -64,6 +64,14 @@ Attention model outperforms mean-pool baseline by **17.8% AUC**, confirming that
 
 ---
 
+## Attention Visualization
+
+![Attention example](assets/tumor_077_heatmap.png)
+
+*On a tumor-positive slide (11,870 patches), the model's highest-attention patches (middle panel) show dense, hypercellular tissue with atypical morphology — learned entirely from a slide-level label, with no patch-level annotation. Note: the left panel arranges patches into an approximate grid for visualization; it is not a true spatial overlay on the original slide, since patch coordinates were not retained during extraction.*
+
+---
+
 ## Key Design Decisions
 
 **Why Phikon instead of ImageNet ResNet50?**
@@ -85,13 +93,12 @@ camelyon-attention-mil/
 ├── download_additional_100.py          # Download 100 more slides (total → 150)
 ├── inspect_slide.py                    # Inspect WSI metadata (mpp, levels, dims)
 ├── extract_patches.py                  # Tissue segmentation + patch tiling
-├── extract_features.py                 # ResNet50 feature extraction (CPU baseline)
-├── extract_features_phikon.py          # Phikon (ViT-B) feature extraction (GPU)
-├── extract_features_server.py          # GPU server variant
-├── extract_features_new100.py          # Feature extraction for additional slides
-├── train_mil_150.py                    # MIL training — ResNet50 features
-├── train_mil_phikon.py                 # MIL training — Phikon features (main)
+├── extract_features.py                 # ResNet50 feature extraction (ablation baseline)
+├── extract_features_phikon.py          # Phikon (ViT-B) feature extraction (main)
+├── train_mil_150.py                    # MIL training — ResNet50 features (ablation)
+├── train_mil_phikon.py                 # MIL training — Phikon features (main result)
 ├── visualize_attention.py              # Attention heatmap generation
+├── assets/                             # README images
 ├── requirements.txt
 └── README.md
 ```
@@ -125,6 +132,11 @@ CUDA_VISIBLE_DEVICES=0 python extract_features_phikon.py
 ### 5. Train
 ```bash
 CUDA_VISIBLE_DEVICES=0 python train_mil_phikon.py
+```
+
+### 6. Generate attention heatmaps
+```bash
+python visualize_attention.py
 ```
 
 ---
