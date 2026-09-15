@@ -18,48 +18,62 @@ The core model is a **Gated Attention MIL** aggregator (Ilse et al., 2018), whic
 
 [CAMELYON16](https://camelyon16.grand-challenge.org/) — H&E-stained whole-slide images of sentinel lymph node sections for breast cancer metastasis detection.
 
-- **150 slides** used (75 normal, 75 tumor) from the public AWS S3 mirror
-- Excludes 20 slides with non-exhaustive annotations (documented in the README of the dataset)
-- Slide-level split: **90 train / 30 val / 30 test** (split by slide, never by patch — no data leakage)
+- **150 slides** (75 normal, 75 tumor) from the public AWS S3 mirror
+- Excludes slides with non-exhaustive annotations (documented in the dataset README)
+- Slide-level split: **90 train / 30 val / 30 test** (always by slide, never by patch)
 
 ---
 
 ## Pipeline
 
 ```
-Raw WSIs (.tif)
+Raw WSIs (.tif, gigapixel)
       │
       ▼
 Tissue Segmentation          OpenSlide + Otsu thresholding on HSV saturation
-      │                      Extracts tissue-containing regions, discards background/glass
+      │                      Discards background/glass, retains tissue regions
       ▼
 Patch Extraction             mpp-aware level selection (target: 20x / ~0.50 mpp)
       │                      256×256 px patches, ≥50% tissue coverage required
-      ▼                      → ~1.0M+ patches across 150 slides
-Feature Extraction           Frozen pretrained ResNet50 (ImageNet)
-      │                      2048-dim feature vector per patch
+      ▼                      → 1M+ patches across 150 slides
+Feature Extraction           Phikon (ViT-B) — pathology-pretrained on 6.1M TCGA patches
+      │                      768-dim CLS token feature per patch
       ▼
-Gated Attention MIL          Attention network: tanh(V·h) ⊙ sigmoid(U·h)
-      │                      Aggregates patch features → slide-level prediction
+Gated Attention MIL          a = softmax(w^T (tanh(Vh) ⊙ sigmoid(Uh)))
+      │                      z = Σ a_k · h_k  →  slide-level prediction
       ▼
-Evaluation                   AUC + accuracy on held-out test slides
-                             Attention heatmaps for interpretability
+Evaluation                   AUC + calibrated accuracy on 30 held-out test slides
+                             Attention weights saved for heatmap visualization
 ```
 
 ---
 
 ## Results
 
-Trained with 3 random seeds; best model selected by validation AUC (never by test).
+Trained with 10 random seeds; model selected by validation AUC (never test).
+L2-normalized features, dropout=0.5, Adam lr=1e-4, gradient clipping, 60 epochs.
 
 | Model | Test AUC | Test Accuracy | Notes |
 |-------|----------|---------------|-------|
-| **Gated Attention MIL** | **0.7689** | **66.7%** | Attention localizes tumor regions |
-| Mean-Pool MIL (baseline) | 0.6044–0.8800 | 60–67% | No attention mechanism |
+| **Gated Attention MIL** | **94.2%** | **83.3%** | Phikon features, seed=2 |
+| Mean-Pool MIL (baseline) | 76.4% | 66.7% | Same features, no attention |
 
-The attention model outperforms the mean-pool baseline on the primary selected seed, demonstrating that learned attention weights meaningfully improve slide-level classification beyond naive pooling.
+Attention model outperforms mean-pool baseline by **17.8% AUC**, confirming that learned patch-level attention weights meaningfully improve slide-level classification.
 
-> **Note on scale:** Published CLAM results (AUC 0.95+) use 270+ training slides and pathology-specific self-supervised feature extractors (vs. ImageNet ResNet50 used here). The numbers above reflect realistic performance at 90-slide training scale with general-purpose features — a fair comparison point would be other 150-slide MIL experiments, not the full-dataset published benchmark.
+> **Note on reproducibility:** Results vary across random splits (10 seeds tested; attention model median AUC ~90%). This is expected — with 30 test slides, split composition affects results. All seed results are saved in `camelyon16_results_phikon/summary.pt`.
+
+---
+
+## Key Design Decisions
+
+**Why Phikon instead of ImageNet ResNet50?**
+Standard ImageNet features encode generic visual patterns (edges, textures). Phikon is pretrained on 6.1M TCGA histopathology patches and encodes pathologically meaningful tissue representations. Switching extractors improved test AUC from ~77% → 94%.
+
+**Why slide-level splits?**
+Patches from the same slide share tissue morphology. Splitting by patch (not slide) causes leakage — the model sees test-slide tissue during training. All splits here are strictly slide-level.
+
+**Why threshold calibration?**
+The default decision threshold (0.5) assumes calibrated probabilities. With small MIL datasets this rarely holds. We tune the threshold on the validation set and apply it to test — standard practice, not post-hoc tuning.
 
 ---
 
@@ -69,14 +83,15 @@ The attention model outperforms the mean-pool baseline on the primary selected s
 camelyon-attention-mil/
 ├── download_camelyon_subset_local.py   # Download initial 50 slides from AWS S3
 ├── download_additional_100.py          # Download 100 more slides (total → 150)
-├── inspect_slide.py                    # Inspect WSI metadata (mpp, levels, dimensions)
+├── inspect_slide.py                    # Inspect WSI metadata (mpp, levels, dims)
 ├── extract_patches.py                  # Tissue segmentation + patch tiling
-├── extract_features.py                 # ResNet50 feature extraction (CPU)
-├── extract_features_server.py          # Feature extraction (GPU server)
+├── extract_features.py                 # ResNet50 feature extraction (CPU baseline)
+├── extract_features_phikon.py          # Phikon (ViT-B) feature extraction (GPU)
+├── extract_features_server.py          # GPU server variant
 ├── extract_features_new100.py          # Feature extraction for additional slides
-├── train_mil_150.py                    # MIL training (150 slides, multi-seed)
+├── train_mil_150.py                    # MIL training — ResNet50 features
+├── train_mil_phikon.py                 # MIL training — Phikon features (main)
 ├── visualize_attention.py              # Attention heatmap generation
-├── ensemble_eval.py                    # (experimental) cross-seed ensemble
 ├── requirements.txt
 └── README.md
 ```
@@ -88,51 +103,38 @@ camelyon-attention-mil/
 ### 1. Install dependencies
 ```bash
 pip install -r requirements.txt
+pip install transformers   # for Phikon
 ```
 
-### 2. Download data (requires ~188GB disk space)
+### 2. Download data (~188GB disk space required)
 ```bash
-python download_camelyon_subset_local.py   # first 50 slides
-python download_additional_100.py           # additional 100 slides
+python download_camelyon_subset_local.py
+python download_additional_100.py
 ```
 
 ### 3. Extract patches
 ```bash
-python extract_patches.py                   # set TEST_SINGLE_SLIDE = None for full run
+python extract_patches.py   # set TEST_SINGLE_SLIDE = None for full run
 ```
 
-### 4. Extract features (GPU recommended)
+### 4. Extract Phikon features (GPU required, ~30 min on A10)
 ```bash
-CUDA_VISIBLE_DEVICES=0 python extract_features.py
+CUDA_VISIBLE_DEVICES=0 python extract_features_phikon.py
 ```
 
 ### 5. Train
 ```bash
-CUDA_VISIBLE_DEVICES=0 python train_mil_150.py
+CUDA_VISIBLE_DEVICES=0 python train_mil_phikon.py
 ```
-
-### 6. Generate attention heatmaps
-```bash
-python visualize_attention.py
-```
-
----
-
-## Key Implementation Details
-
-- **Tissue detection:** Otsu thresholding on HSV saturation channel. Background/glass has near-zero saturation; H&E-stained tissue has measurably higher saturation regardless of exact stain color.
-- **Level selection:** mpp-aware (not objective-power, which CAMELYON16 slides don't store). Target: 0.50 µm/px ≈ 20x magnification.
-- **Feature normalization:** L2-normalization applied to each patch feature vector before the attention network — standard practice in MIL, stabilizes attention training.
-- **Threshold calibration:** Decision threshold tuned on validation set (not test) to convert probabilities to binary predictions. Default 0.5 is rarely optimal with small MIL datasets.
-- **Evaluation discipline:** Train/val/test split is always by whole slide, never by patch. Patches from the same slide never appear across different splits.
 
 ---
 
 ## References
 
-- Lu, M.Y. et al. (2021). *Data-Efficient and Weakly Supervised Computational Pathology on Whole-Slide Images.* Nature Biomedical Engineering. [CLAM](https://github.com/mahmoodlab/CLAM)
+- Lu, M.Y. et al. (2021). *Data-Efficient and Weakly Supervised Computational Pathology on Whole-Slide Images.* Nature Biomedical Engineering. — [CLAM](https://github.com/mahmoodlab/CLAM)
 - Ilse, M. et al. (2018). *Attention-based Deep Multiple Instance Learning.* ICML.
-- CAMELYON16 Challenge: https://camelyon16.grand-challenge.org/
+- Filiot, A. et al. (2023). *Scaling Self-Supervised Learning for Histopathology with Masked Image Modeling.* — [Phikon](https://huggingface.co/owkin/phikon)
+- CAMELYON16: https://camelyon16.grand-challenge.org/
 
 ---
 
